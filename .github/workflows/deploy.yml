@@ -1,0 +1,89 @@
+name: Deploy Multi-Cloud AI Agent
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GCP_REGION: us-central1
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Auth to AWS and GCP up front; Terraform needs both ----
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ---- Step 1: Terraform provisions Azure NLP, AWS S3+Lambda, GCP registry ----
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        id: tf
+        working-directory: terraform
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_azure_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_s3_bucket_name: ${{ secrets.S3_BUCKET_NAME }}
+        run: |
+          terraform apply -auto-approve
+
+          AZURE_KEY=$(terraform output -raw azure_language_key)
+          echo "::add-mask::$AZURE_KEY"
+
+          {
+            echo "azure_endpoint=$(terraform output -raw azure_language_endpoint)"
+            echo "lambda_url=$(terraform output -raw lambda_function_url)"
+            echo "azure_key=$AZURE_KEY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload knowledge base docs to S3
+        run: aws s3 cp knowledge-base/ s3://${{ secrets.S3_BUCKET_NAME }}/ --recursive
+
+      # ---- Step 2: build the orchestrator image and push to Artifact Registry ----
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE=${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ai-agent-repo/orchestrator:${{ github.sha }}
+          docker build -t $IMAGE ./orchestrator
+          docker push $IMAGE
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # ---- Step 3: deploy the orchestrator to Cloud Run ----
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ai-agent-orchestrator
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars: |
+            AZURE_LANGUAGE_ENDPOINT=${{ steps.tf.outputs.azure_endpoint }}
+            LAMBDA_FUNCTION_URL=${{ steps.tf.outputs.lambda_url }}
+            AZURE_LANGUAGE_KEY=${{ steps.tf.outputs.azure_key }}
