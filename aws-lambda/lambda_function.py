@@ -5,7 +5,7 @@ import boto3
 bedrock = boto3.client("bedrock-runtime")
 s3 = boto3.client("s3")
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.amazon.nova-micro-v1:0")
 KB_BUCKET = os.environ.get("KB_BUCKET")
 
 
@@ -36,14 +36,12 @@ def draft_reply_with_bedrock(ticket_text: str, key_phrases: list[str]) -> str:
         f"customer ticket. Key topics detected: {', '.join(key_phrases) or 'none'}.\n\n"
         f"Ticket:\n{ticket_text}\n\nDraft reply:"
     )
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 300,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    response = bedrock.invoke_model(modelId=MODEL_ID, body=json.dumps(request_body))
-    result = json.loads(response["body"].read())
-    return result["content"][0]["text"]
+    response = bedrock.converse(
+        modelId=MODEL_ID,
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 300},
+    )
+    return response["output"]["message"]["content"][0]["text"]
 
 
 def recommend_doc_from_kb(key_phrases: list[str]) -> dict:

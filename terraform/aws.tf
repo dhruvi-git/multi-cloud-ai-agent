@@ -78,7 +78,7 @@ resource "aws_lambda_function" "draft_reply" {
   environment {
     variables = {
       KB_BUCKET        = aws_s3_bucket.knowledge_base.bucket
-      BEDROCK_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
+      BEDROCK_MODEL_ID = "us.amazon.nova-micro-v1:0"
     }
   }
 }
